@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
+import litellm
 from src.classifier.classifier import ClassificationLevel
 from src.router.router import InferenceRouter, RouterConfig, SecretDataRejectedError
 
@@ -20,6 +21,8 @@ def _make_router():
 
 
 class TestInferenceRouter(unittest.TestCase):
+    def run_async(self, coro):
+        return asyncio.run(coro)
 
     def test_get_target_url_confidential(self):
         r = _make_router()
@@ -41,47 +44,39 @@ class TestInferenceRouter(unittest.TestCase):
     def test_route_secret_raises(self):
         r = _make_router()
         with self.assertRaises(SecretDataRejectedError):
-            asyncio.get_event_loop().run_until_complete(
-                r.route({"messages": []}, ClassificationLevel.SECRET)
-            )
+            self.run_async(r.route({"messages": []}, ClassificationLevel.SECRET))
 
     def test_route_success(self):
         r = _make_router()
-
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.is_success = True
-
-        mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.post = AsyncMock(return_value=mock_response)
-
-        with patch("src.router.router.httpx.AsyncClient", return_value=mock_client):
-            result = asyncio.get_event_loop().run_until_complete(
-                r.route({"messages": []}, ClassificationLevel.PUBLIC)
-            )
+        mock_response = AsyncMock(spec=litellm.types.utils.ModelResponse)
+        mock_response.model_dump.return_value = {"choices": [{"message": {"content": "ok"}}]}
+        with patch("src.router.router.litellm.acompletion", new=AsyncMock(return_value=mock_response)):
+            result = self.run_async(r.route({"messages": []}, ClassificationLevel.PUBLIC))
 
         self.assertTrue(result.success)
         self.assertEqual(result.target_url, "http://svc-c/infer")
         self.assertEqual(result.classification, ClassificationLevel.PUBLIC)
+        self.assertEqual(result.request_id is not None, True)
 
-    def test_route_network_error(self):
-        import httpx
+    def test_route_auth_error(self):
         r = _make_router()
-
-        mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.post = AsyncMock(side_effect=httpx.ConnectError("refused"))
-
-        with patch("src.router.router.httpx.AsyncClient", return_value=mock_client):
-            result = asyncio.get_event_loop().run_until_complete(
-                r.route({"messages": []}, ClassificationLevel.INTERNAL)
-            )
+        with patch(
+            "src.router.router.litellm.acompletion",
+            new=AsyncMock(side_effect=litellm.exceptions.AuthenticationError("bad key", "openai", "gpt-4o")),
+        ):
+            result = self.run_async(r.route({"messages": []}, ClassificationLevel.INTERNAL))
 
         self.assertFalse(result.success)
         self.assertIsNotNone(result.error)
+        self.assertIn("bad key", result.error)
+
+    def test_route_generic_error(self):
+        r = _make_router()
+        with patch("src.router.router.litellm.acompletion", new=AsyncMock(side_effect=Exception("refused"))):
+            result = self.run_async(r.route({"messages": []}, ClassificationLevel.INTERNAL))
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "upstream inference request failed")
 
 
 if __name__ == "__main__":

@@ -16,9 +16,11 @@ from __future__ import annotations
 import logging
 import os
 import time
+import uuid
 from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, status
+from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -28,6 +30,7 @@ from src.config import Settings, get_settings
 from src.otel import get_meter, get_tracer, setup_telemetry
 from src.router import InferenceRouter
 from src.router.router import RouterConfig, SecretDataRejectedError
+import structlog
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -35,9 +38,14 @@ from src.router.router import RouterConfig, SecretDataRejectedError
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger(__name__)
+structlog.configure(processors=[structlog.processors.JSONRenderer()])
+log = structlog.get_logger(__name__)
+
+
+class RequestTooLargeError(Exception):
+    pass
 
 # ---------------------------------------------------------------------------
 # Request / Response models (defined at module level so FastAPI resolves them)
@@ -129,6 +137,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         url_confidential=str(cfg.inference_url_confidential),
         url_internal=str(cfg.inference_url_internal),
         url_public=str(cfg.inference_url_public),
+        model_confidential=cfg.litellm_model_confidential,
+        model_internal=cfg.litellm_model_internal,
+        model_public=cfg.litellm_model_public,
+        enable_fallbacks=cfg.litellm_enable_fallbacks,
+        max_retries=cfg.litellm_max_retries,
         timeout_seconds=cfg.inference_timeout_seconds,
         verify_ssl=cfg.inference_verify_ssl,
     )
@@ -142,6 +155,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         ),
         version="1.0.0",
     )
+    app.state.max_body_bytes = 1024 * 1024
 
     app.add_middleware(
         CORSMiddleware,
@@ -196,6 +210,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     @app.post("/v1/infer", response_model=InferenceResponse, tags=["inference"])
     async def infer(
+        request: Request,
         req: Annotated[InferenceRequest, Body()],
         role: Optional[str] = Depends(_get_role),
     ):
@@ -203,6 +218,13 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         Main endpoint: classify → (optionally anonymise) → route → return response.
         """
         t0 = time.monotonic()
+        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        body = await request.body()
+        if len(body) > app.state.max_body_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail={"request_id": request_id},
+            )
 
         # Concatenate all message contents for classification
         full_text = " ".join(m.content for m in req.messages)
@@ -263,22 +285,31 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     payload=payload,
                     level=level,
                     anonymized=should_anonymize,
+                    request_id=request_id,
                 )
                 span.set_attribute("target_url", result.target_url)
         except SecretDataRejectedError as exc:  # belt-and-suspenders
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"request_id": request_id},
+            )
 
         latency_histogram.record(
             (time.monotonic() - t0) * 1000, {"classification": level.value}
         )
+        duration_ms = (time.monotonic() - t0) * 1000
 
-        upstream_status = result.response.status_code if result.response else None
-        upstream_body = None
-        if result.response is not None:
-            try:
-                upstream_body = result.response.json()
-            except Exception:
-                upstream_body = result.response.text
+        upstream_status = 200 if result.response else None
+        upstream_body = result.response.model_dump() if result.response else None
+        log.info(
+            "inference_request",
+            request_id=request_id,
+            classification_level=level.value,
+            target_model=cfg.litellm_model_public,
+            anonymized=should_anonymize,
+            duration_ms=duration_ms,
+            status_code=upstream_status,
+        )
 
         return InferenceResponse(
             classification=level.value,

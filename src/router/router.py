@@ -13,14 +13,19 @@ data classification level.
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-import httpx
+import litellm
+import structlog
+from litellm.types.utils import ModelResponse
 
 from src.classifier import ClassificationLevel
 
 logger = logging.getLogger(__name__)
+structlog.configure(processors=[structlog.processors.JSONRenderer()])
+log = structlog.get_logger(__name__)
 
 
 class SecretDataRejectedError(Exception):
@@ -29,11 +34,16 @@ class SecretDataRejectedError(Exception):
 
 @dataclass
 class RouterConfig:
-    """URL configuration for the three inference endpoints."""
+    """Backend/model configuration for the three inference endpoints."""
 
     url_confidential: str
     url_internal: str
     url_public: str
+    model_confidential: str = "openai/gpt-4o"
+    model_internal: str = "openai/gpt-4o-mini"
+    model_public: str = "openai/gpt-3.5-turbo"
+    enable_fallbacks: bool = True
+    max_retries: int = 3
     timeout_seconds: float = 60.0
     verify_ssl: bool = True
 
@@ -46,12 +56,13 @@ class RoutingResult:
     target_url: str
     payload: Dict[str, Any]
     anonymized: bool
-    response: Optional[httpx.Response] = None
+    request_id: str
+    response: Optional[ModelResponse] = None
     error: Optional[str] = None
 
     @property
     def success(self) -> bool:
-        return self.response is not None and self.response.is_success
+        return self.response is not None and self.error is None
 
 
 class InferenceRouter:
@@ -66,6 +77,7 @@ class InferenceRouter:
 
     def __init__(self, config: RouterConfig) -> None:
         self.config = config
+        litellm.set_verbose = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -87,12 +99,26 @@ class InferenceRouter:
         }
         return mapping[level]
 
+    def get_target_model(self, level: ClassificationLevel) -> str:
+        """Return the configured LiteLLM model alias for a classification level."""
+        if level == ClassificationLevel.SECRET:
+            raise SecretDataRejectedError(
+                "Data classified as SECRET cannot be forwarded to any inference service."
+            )
+        mapping = {
+            ClassificationLevel.CONFIDENTIAL: self.config.model_confidential,
+            ClassificationLevel.INTERNAL: self.config.model_internal,
+            ClassificationLevel.PUBLIC: self.config.model_public,
+        }
+        return mapping[level]
+
     async def route(
         self,
         payload: Dict[str, Any],
         level: ClassificationLevel,
         anonymized: bool = False,
         extra_headers: Optional[Dict[str, str]] = None,
+        request_id: Optional[str] = None,
     ) -> RoutingResult:
         """
         Forward *payload* to the appropriate inference endpoint.
@@ -113,36 +139,71 @@ class InferenceRouter:
         except SecretDataRejectedError:
             raise
 
-        headers = {"Content-Type": "application/json"}
-        if extra_headers:
-            headers.update(extra_headers)
+        target_model = self.get_target_model(level)
 
         result = RoutingResult(
             classification=level,
             target_url=target_url,
             payload=payload,
             anonymized=anonymized,
+            request_id=request_id or str(uuid.uuid4()),
         )
 
-        async with httpx.AsyncClient(
-            timeout=self.config.timeout_seconds,
-            verify=self.config.verify_ssl,
-        ) as client:
-            try:
-                response = await client.post(
-                    target_url, json=payload, headers=headers
-                )
-                result.response = response
-                logger.info(
-                    "Routed %s request to %s – status %s",
-                    level.value,
-                    target_url,
-                    response.status_code,
-                )
-            except httpx.RequestError as exc:
-                result.error = str(exc)
-                logger.error(
-                    "Failed to reach inference service at %s: %s", target_url, exc
-                )
+        acompletion_kwargs: Dict[str, Any] = {
+            "model": target_model,
+            "api_base": target_url,
+            "messages": payload["messages"],
+            "num_retries": self.config.max_retries,
+            "request_timeout": self.config.timeout_seconds,
+            "ssl_verify": self.config.verify_ssl,
+        }
+        if extra_headers:
+            acompletion_kwargs["extra_headers"] = extra_headers
+        if self.config.enable_fallbacks:
+            acompletion_kwargs["fallbacks"] = [
+                self.config.model_confidential,
+                self.config.model_internal,
+                self.config.model_public,
+            ]
+        if "model" in payload:
+            acompletion_kwargs["model"] = payload["model"]
+        for key, value in payload.items():
+            if key not in {"messages", "model"}:
+                acompletion_kwargs[key] = value
+
+        try:
+            response = await litellm.acompletion(**acompletion_kwargs)
+            result.response = response
+            log.info(
+                "litellm_route_success",
+                request_id=result.request_id,
+                classification_level=level.value,
+                target_model=acompletion_kwargs["model"],
+                anonymized=anonymized,
+                duration_ms=None,
+                status_code=200,
+            )
+        except litellm.exceptions.AuthenticationError as exc:
+            result.error = str(exc)
+            log.error(
+                "litellm_route_auth_error",
+                request_id=result.request_id,
+                classification_level=level.value,
+                target_model=target_model,
+                anonymized=anonymized,
+                duration_ms=None,
+                status_code=502,
+            )
+        except Exception:
+            result.error = "upstream inference request failed"
+            log.error(
+                "litellm_route_error",
+                request_id=result.request_id,
+                classification_level=level.value,
+                target_model=target_model,
+                anonymized=anonymized,
+                duration_ms=None,
+                status_code=500,
+            )
 
         return result

@@ -35,6 +35,26 @@ class Settings(BaseSettings):
         default="http://inference-service-c/v1/chat/completions",
         description="Inference endpoint for PUBLIC data (URL C).",
     )
+    litellm_model_confidential: str = Field(
+        default="openai/gpt-4o",
+        description="LiteLLM model alias used for CONFIDENTIAL data routing.",
+    )
+    litellm_model_internal: str = Field(
+        default="openai/gpt-4o-mini",
+        description="LiteLLM model alias used for INTERNAL data routing.",
+    )
+    litellm_model_public: str = Field(
+        default="openai/gpt-3.5-turbo",
+        description="LiteLLM model alias used for PUBLIC data routing.",
+    )
+    litellm_enable_fallbacks: bool = Field(
+        default=True,
+        description="Enable LiteLLM fallback model list when routing requests.",
+    )
+    litellm_max_retries: int = Field(
+        default=3,
+        description="Maximum number of LiteLLM retries for upstream failures.",
+    )
     inference_timeout_seconds: float = Field(
         default=60.0, description="HTTP timeout for upstream inference calls."
     )
