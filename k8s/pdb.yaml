@@ -1,0 +1,17 @@
+---
+# PodDisruptionBudget – guarantee at least one replica is available during
+# voluntary disruptions (node drains, cluster upgrades).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: inference-router
+  namespace: inference-router
+  labels:
+    app: inference-router
+    environment: production
+spec:
+  # At least 1 Pod must remain available; works safely with minReplicas: 2.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: inference-router

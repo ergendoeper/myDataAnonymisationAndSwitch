@@ -1,0 +1,86 @@
+---
+# OPA Gatekeeper ConstraintTemplate – enforce runAsNonRoot.
+# CIS 5.2.6 – Do not admit root containers.
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequirenonroot
+  annotations:
+    description: "Requires all containers to set runAsNonRoot: true and not run as UID 0."
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequireNonRoot
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            exemptImages:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequirenonroot
+
+        import future.keywords.every
+        import future.keywords.in
+
+        violation[{"msg": msg}] {
+          container := input_containers[_]
+          not exempt(container)
+          not non_root(container)
+          msg := sprintf("Container '%v' must set runAsNonRoot: true or runAsUser > 0", [container.name])
+        }
+
+        violation[{"msg": msg}] {
+          container := input_containers[_]
+          not exempt(container)
+          container.securityContext.runAsUser == 0
+          msg := sprintf("Container '%v' must not run as UID 0 (root)", [container.name])
+        }
+
+        non_root(container) {
+          container.securityContext.runAsNonRoot == true
+        }
+
+        non_root(container) {
+          container.securityContext.runAsUser > 0
+        }
+
+        exempt(container) {
+          img := input.parameters.exemptImages[_]
+          startswith(container.image, img)
+        }
+
+        input_containers[c] {
+          c := input.review.object.spec.containers[_]
+        }
+
+        input_containers[c] {
+          c := input.review.object.spec.initContainers[_]
+        }
+
+        input_containers[c] {
+          c := input.review.object.spec.ephemeralContainers[_]
+        }
+---
+# Constraint – apply the NonRoot policy to the inference-router namespace.
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequireNonRoot
+metadata:
+  name: require-non-root-inference-router
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet", "ReplicaSet"]
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces:
+      - inference-router
+  parameters:
+    exemptImages: []

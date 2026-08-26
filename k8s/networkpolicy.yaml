@@ -1,0 +1,131 @@
+---
+# CIS 5.3.2 – Ensure that all Namespaces have Network Policies defined.
+# Default-deny ALL ingress and egress; only explicitly permitted traffic flows.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: inference-router
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Allow ingress only from the nginx ingress-controller pods in ingress-nginx namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-controller
+  namespace: inference-router
+spec:
+  podSelector:
+    matchLabels:
+      app: inference-router
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+# Allow egress to the three upstream inference services (same namespace).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-inference-services
+  namespace: inference-router
+spec:
+  podSelector:
+    matchLabels:
+      app: inference-router
+  policyTypes:
+    - Egress
+  egress:
+    # inference-service-a (CONFIDENTIAL)
+    - to:
+        - podSelector:
+            matchLabels:
+              app: inference-service-a
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+    # inference-service-b (INTERNAL)
+    - to:
+        - podSelector:
+            matchLabels:
+              app: inference-service-b
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+    # inference-service-c (PUBLIC)
+    - to:
+        - podSelector:
+            matchLabels:
+              app: inference-service-c
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+---
+# Allow egress to Grafana Alloy OTEL collector in the monitoring namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-otel-collector
+  namespace: inference-router
+spec:
+  podSelector:
+    matchLabels:
+      app: inference-router
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app: grafana-alloy
+      ports:
+        - protocol: TCP
+          port: 4317   # OTLP gRPC
+        - protocol: TCP
+          port: 4318   # OTLP HTTP
+---
+# Allow egress to kube-dns for internal DNS resolution (CIS 5.3.2 note).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: inference-router
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

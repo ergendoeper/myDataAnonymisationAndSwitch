@@ -1,0 +1,208 @@
+---
+# ConfigMap – non-sensitive configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inference-router-config
+  namespace: inference-router
+  labels:
+    app: inference-router
+    version: "1.0.0"
+    environment: production
+data:
+  INFERENCE_URL_CONFIDENTIAL: "http://inference-service-a.inference-router.svc.cluster.local/v1/chat/completions"
+  INFERENCE_URL_INTERNAL: "http://inference-service-b.inference-router.svc.cluster.local/v1/chat/completions"
+  INFERENCE_URL_PUBLIC: "http://inference-service-c.inference-router.svc.cluster.local/v1/chat/completions"
+  ANONYMIZER_ENABLED: "true"
+  ANONYMIZATION_SKIP_ALLOWED_ROLES: '["admin","trusted"]'
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://grafana-alloy.monitoring.svc.cluster.local:4317"
+  OTEL_SERVICE_NAME: "inference-router"
+  LOG_LEVEL: "INFO"
+  CLASSIFIER_LANGUAGE: "en"
+  CLASSIFIER_SCORE_THRESHOLD: "0.5"
+---
+# Secret – sensitive values.
+# DO NOT commit real secrets. Create this secret out-of-band:
+#
+#   kubectl create secret generic inference-router-secrets \
+#     --from-literal=API_KEYS="<your-key1>,<your-key2>" \
+#     --from-literal=API_KEY_ROLES="<key1>:admin,<key2>:trusted" \
+#     --namespace inference-router
+#
+# For GitOps workflows use Sealed Secrets, External Secrets Operator, or
+# a Vault CSI provider and remove this YAML from the repository entirely.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: inference-router-secrets
+  namespace: inference-router
+  labels:
+    app: inference-router
+    version: "1.0.0"
+    environment: production
+type: Opaque
+# stringData values below are intentionally empty placeholders.
+# Replace them via the kubectl command above — never store real values here.
+stringData:
+  API_KEYS: ""
+  API_KEY_ROLES: ""
+---
+# CIS 5.2 / 5.7 – Hardened Deployment.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-router
+  namespace: inference-router
+  labels:
+    app: inference-router
+    version: "1.0.0"
+    environment: production
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: inference-router
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: inference-router
+        version: "1.0.0"
+        environment: production
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+        # Re-deploy when ConfigMap changes (checksum via Helm; set manually here as placeholder)
+        # checksum/config: "<helm-sha256sum>"
+    spec:
+      # ── Service Account ──────────────────────────────────────────────────
+      serviceAccountName: inference-router
+      # CIS 5.1.6 – Do not mount service-account tokens unless required.
+      automountServiceAccountToken: false
+
+      # ── Host isolation (CIS 5.2.2 / 5.2.3 / 5.2.4) ─────────────────────
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+
+      # ── Pod-level security context (CIS 5.2.6 / 5.7.4) ──────────────────
+      securityContext:
+        runAsNonRoot: true
+        # Non-standard UID/GID (CIS recommendation: avoid 0 and well-known UIDs)
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        # CIS 5.7.5 – Use seccomp profiles
+        seccompProfile:
+          type: RuntimeDefault
+
+      # ── Scheduling ───────────────────────────────────────────────────────
+      priorityClassName: inference-router-priority
+
+      # Hard anti-affinity: never schedule two replicas on the same node.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: inference-router
+              topologyKey: kubernetes.io/hostname
+
+      # Spread across failure zones for HA.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: inference-router
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: inference-router
+
+      # ── Containers ───────────────────────────────────────────────────────
+      containers:
+        - name: inference-router
+          # Pin to a specific digest to prevent image substitution attacks.
+          # Replace the sha256 placeholder after every image build.
+          # Example: ghcr.io/ergendoeper/inference-router:1.0.0@sha256:<digest>
+          image: ghcr.io/ergendoeper/inference-router:1.0.0  # TODO: append @sha256:<digest>
+          imagePullPolicy: Always
+
+          ports:
+            - containerPort: 8000
+              name: http
+              protocol: TCP
+
+          envFrom:
+            - configMapRef:
+                name: inference-router-config
+            - secretRef:
+                name: inference-router-secrets
+
+          # ── Container-level security context (CIS 5.2.1 / 5.2.5) ────────
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+            # runAsNonRoot/runAsUser inherited from pod securityContext,
+            # but can be repeated here for explicitness if OPA requires it.
+
+          # ── Probes ───────────────────────────────────────────────────────
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 30
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # ── Resources ────────────────────────────────────────────────────
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+
+          # ── Volume mounts ────────────────────────────────────────────────
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+      # ── Volumes ──────────────────────────────────────────────────────────
+      volumes:
+        # Use Memory-backed emptyDir for /tmp to avoid disk-leak and to ensure
+        # the readOnlyRootFilesystem constraint is satisfied.
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi

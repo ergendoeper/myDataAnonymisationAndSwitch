@@ -1,0 +1,68 @@
+---
+# OPA Gatekeeper ConstraintTemplate – enforce readOnlyRootFilesystem.
+# CIS 5.2.4 – Minimise container filesystem write access.
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequirereadonlyrootfs
+  annotations:
+    description: "Requires all containers to set readOnlyRootFilesystem: true."
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequireReadOnlyRootFs
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            exemptImages:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequirereadonlyrootfs
+
+        violation[{"msg": msg}] {
+          container := input_containers[_]
+          not exempt(container)
+          not container.securityContext.readOnlyRootFilesystem == true
+          msg := sprintf("Container '%v' must set readOnlyRootFilesystem: true", [container.name])
+        }
+
+        exempt(container) {
+          img := input.parameters.exemptImages[_]
+          startswith(container.image, img)
+        }
+
+        input_containers[c] {
+          c := input.review.object.spec.containers[_]
+        }
+
+        input_containers[c] {
+          c := input.review.object.spec.initContainers[_]
+        }
+
+        input_containers[c] {
+          c := input.review.object.spec.ephemeralContainers[_]
+        }
+---
+# Constraint – apply to the inference-router namespace.
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequireReadOnlyRootFs
+metadata:
+  name: require-readonly-rootfs-inference-router
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet", "ReplicaSet"]
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces:
+      - inference-router
+  parameters:
+    exemptImages: []

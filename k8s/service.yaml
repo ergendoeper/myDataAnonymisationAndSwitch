@@ -1,0 +1,21 @@
+---
+# ClusterIP Service – no NodePort or LoadBalancer (CIS 5.3 / ResourceQuota enforces this).
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-router
+  namespace: inference-router
+  labels:
+    app: inference-router
+    version: "1.0.0"
+    environment: production
+spec:
+  type: ClusterIP
+  selector:
+    app: inference-router
+  ports:
+    - port: 80
+      targetPort: http
+      name: http
+      # appProtocol enables L7-aware load-balancing and service-mesh integrations.
+      appProtocol: http

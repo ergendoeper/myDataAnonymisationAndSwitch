@@ -1,0 +1,76 @@
+---
+# OPA Gatekeeper ConstraintTemplate – disallow :latest image tags.
+# Using :latest prevents reproducible deployments and violates CIS image provenance controls.
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8sdisallowlatesttag
+  annotations:
+    description: "Disallows container images tagged ':latest' or without an explicit tag."
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sDisallowLatestTag
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            exemptImages:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sdisallowlatesttag
+
+        violation[{"msg": msg}] {
+          container := input_containers[_]
+          not exempt(container)
+          endswith(container.image, ":latest")
+          msg := sprintf("Container '%v' uses the ':latest' tag which is not allowed. Pin to a specific version or digest.", [container.name])
+        }
+
+        violation[{"msg": msg}] {
+          container := input_containers[_]
+          not exempt(container)
+          # Image with no tag defaults to :latest
+          not contains(container.image, ":")
+          msg := sprintf("Container '%v' does not specify an image tag. Pin to a specific version or digest.", [container.name])
+        }
+
+        exempt(container) {
+          img := input.parameters.exemptImages[_]
+          startswith(container.image, img)
+        }
+
+        input_containers[c] {
+          c := input.review.object.spec.containers[_]
+        }
+
+        input_containers[c] {
+          c := input.review.object.spec.initContainers[_]
+        }
+
+        input_containers[c] {
+          c := input.review.object.spec.ephemeralContainers[_]
+        }
+---
+# Constraint – apply to the inference-router namespace.
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sDisallowLatestTag
+metadata:
+  name: disallow-latest-tag-inference-router
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet", "ReplicaSet"]
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces:
+      - inference-router
+  parameters:
+    exemptImages: []

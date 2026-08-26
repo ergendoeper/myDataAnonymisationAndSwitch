@@ -1,0 +1,35 @@
+---
+# Minimal RBAC for the inference-router ServiceAccount.
+# CIS 5.1.1-5.1.4 – Apply least-privilege; use Role (namespace-scoped) not ClusterRole.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: inference-router
+  namespace: inference-router
+  labels:
+    app: inference-router
+    environment: production
+rules:
+  # Read own ConfigMap so the app can reload configuration without a restart.
+  # Remove this rule if the application does not perform live ConfigMap reads.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["inference-router-config"]
+    verbs: ["get", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: inference-router
+  namespace: inference-router
+  labels:
+    app: inference-router
+    environment: production
+subjects:
+  - kind: ServiceAccount
+    name: inference-router
+    namespace: inference-router
+roleRef:
+  kind: Role
+  name: inference-router
+  apiGroup: rbac.authorization.k8s.io

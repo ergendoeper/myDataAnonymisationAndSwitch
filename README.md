@@ -142,20 +142,42 @@ Liveness and readiness probes.
 ## Kubernetes Deployment
 
 ```bash
-# 1. Create namespace and deploy Alloy
+# 1. (Once) Create custom PriorityClass (cluster-scoped)
+kubectl apply -f k8s/priorityclass.yaml
+
+# 2. Deploy OPA Gatekeeper ConstraintTemplates and Constraints
+kubectl apply -f k8s/gatekeeper/
+
+# 3. Create namespace, LimitRange, and ResourceQuota
+kubectl apply -f k8s/namespace.yaml
+
+# 4. Deploy RBAC and ServiceAccount
+kubectl apply -f k8s/serviceaccount.yaml
+kubectl apply -f k8s/rbac.yaml
+
+# 5. Apply NetworkPolicies (default-deny + explicit allow rules)
+kubectl apply -f k8s/networkpolicy.yaml
+
+# 6. Deploy the application (ConfigMap, Secret, Deployment)
+#    Edit k8s/deployment.yaml first: update image digest and hostname in k8s/ingress.yaml
+#    Create the Secret out-of-band (see comment in k8s/deployment.yaml):
+#      kubectl create secret generic inference-router-secrets \
+#        --from-literal=API_KEYS="..." --namespace inference-router
+kubectl apply -f k8s/deployment.yaml
+
+# 7. Expose via Service, Ingress, HPA, and PDB
+kubectl apply -f k8s/service.yaml
+kubectl apply -f k8s/ingress.yaml
+kubectl apply -f k8s/hpa.yaml
+kubectl apply -f k8s/pdb.yaml
+
+# 8. Deploy Grafana Alloy (OTEL collector)
 kubectl apply -f k8s/alloy.yaml
 
-# 2. Edit k8s/inference-router.yaml – update image, URLs, and secrets
-kubectl apply -f k8s/inference-router.yaml
-
-# 3. Verify
+# 9. Verify
 kubectl -n inference-router get pods
 kubectl -n inference-router port-forward svc/inference-router 8000:80
 ```
-
-The manifest includes a `Deployment`, `Service`, `ConfigMap`, `Secret`,
-`HorizontalPodAutoscaler`, and `Ingress`. Adjust the `Ingress` host and TLS
-settings to match your cluster.
 
 ---
 
@@ -215,7 +237,61 @@ uvicorn src.main:app --reload
 
 ---
 
-## Security Notes
+## Security & Kubernetes
+
+### CIS Kubernetes Benchmark Controls Implemented
+
+| CIS Control | Description | Implementation |
+|---|---|---|
+| **5.1.1** | Ensure cluster-admin role only used where required | No ClusterRole in RBAC; namespace-scoped Role only |
+| **5.1.5** | Ensure that default service accounts are not bound to active roles | Dedicated `inference-router` ServiceAccount |
+| **5.1.6** | Ensure that Service Account Tokens are not automatically mounted | `automountServiceAccountToken: false` on SA and Pod |
+| **5.2.1** | Minimize admission of privileged containers | OPA `K8sDisallowPrivileged` Constraint + `privileged: false` |
+| **5.2.4** | Minimize admission of containers wishing to share the host filesystem | `readOnlyRootFilesystem: true` + OPA Constraint |
+| **5.2.5** | Minimize admission of containers with privilege escalation | `allowPrivilegeEscalation: false` + OPA Constraint |
+| **5.2.6** | Minimize admission of root containers | `runAsNonRoot: true`, UID 10001 + OPA Constraint |
+| **5.2.7** | Minimize admission of containers with CAP_NET_RAW | `capabilities.drop: [ALL]` |
+| **5.3.2** | Ensure that all Namespaces have Network Policies defined | Default-deny NetworkPolicy + explicit allow rules |
+| **5.4** | Ensure that resource quotas are enabled | `LimitRange` + `ResourceQuota` on namespace |
+| **5.7.1** | Create administrative boundaries between resources using namespaces | Dedicated `inference-router` namespace |
+| **5.7.4** | The default namespace should not be used | All resources in `inference-router` namespace |
+| **5.7.5** | Apply Seccomp profile to Pods/Containers | `seccompProfile: RuntimeDefault` at Pod + Container level |
+
+### OPA Gatekeeper Policies
+
+Six ConstraintTemplates are deployed under `k8s/gatekeeper/`:
+
+| File | Kind | What it enforces |
+|---|---|---|
+| `require-non-root.yaml` | `K8sRequireNonRoot` | `runAsNonRoot: true` / UID > 0 |
+| `require-readonly-rootfs.yaml` | `K8sRequireReadOnlyRootFs` | `readOnlyRootFilesystem: true` |
+| `require-resource-limits.yaml` | `K8sRequireResourceLimits` | CPU + Memory limits on every container |
+| `disallow-privileged.yaml` | `K8sDisallowPrivileged` | No `privileged: true` or `allowPrivilegeEscalation: true` |
+| `require-labels.yaml` | `K8sRequireLabels` | `app`, `version`, `environment` labels on Deployments |
+| `disallow-latest-tag.yaml` | `K8sDisallowLatestTag` | No `:latest` image tags or untagged images |
+
+Deploy all Gatekeeper resources:
+
+```bash
+# Apply ConstraintTemplates first, then wait for CRDs to be ready
+kubectl apply -f k8s/gatekeeper/
+kubectl wait --for=condition=established crd --all --timeout=60s
+```
+
+### Deployment Order
+
+Apply resources in this order to satisfy dependency constraints:
+
+1. **`k8s/priorityclass.yaml`** — cluster-scoped; no namespace dependency
+2. **`k8s/gatekeeper/`** — ConstraintTemplates must exist before workloads are admitted
+3. **`k8s/namespace.yaml`** — namespace + LimitRange + ResourceQuota
+4. **`k8s/serviceaccount.yaml`** + **`k8s/rbac.yaml`** — SA must exist before Deployment references it
+5. **`k8s/networkpolicy.yaml`** — policies take effect as soon as pods are created
+6. **`k8s/deployment.yaml`** — ConfigMap + Secret + Deployment (create Secret out-of-band first)
+7. **`k8s/service.yaml`** + **`k8s/ingress.yaml`** + **`k8s/hpa.yaml`** + **`k8s/pdb.yaml`**
+8. **`k8s/alloy.yaml`** — OTEL collector in the `monitoring` namespace
+
+---
 
 - **SECRET data is rejected** with HTTP 403 before it reaches any inference backend.
 - **Anonymisation is on by default**; only callers with an authorised role can skip it.
