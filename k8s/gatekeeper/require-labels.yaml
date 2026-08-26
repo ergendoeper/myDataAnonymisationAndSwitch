@@ -1,0 +1,57 @@
+---
+# OPA Gatekeeper ConstraintTemplate – require standard labels on Deployments.
+# Enforces `app`, `version`, and `environment` labels for observability and governance.
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequirelabels
+  annotations:
+    description: "Requires Deployments to carry 'app', 'version', and 'environment' labels."
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequireLabels
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            labels:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequirelabels
+
+        violation[{"msg": msg}] {
+          required := input.parameters.labels[_]
+          not input.review.object.metadata.labels[required]
+          msg := sprintf("Deployment '%v' is missing required label '%v'", [input.review.object.metadata.name, required])
+        }
+
+        violation[{"msg": msg}] {
+          required := input.parameters.labels[_]
+          not input.review.object.spec.template.metadata.labels[required]
+          msg := sprintf("Deployment '%v' pod template is missing required label '%v'", [input.review.object.metadata.name, required])
+        }
+---
+# Constraint – apply to the inference-router namespace.
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequireLabels
+metadata:
+  name: require-labels-inference-router
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment"]
+    namespaces:
+      - inference-router
+  parameters:
+    labels:
+      - app
+      - version
+      - environment

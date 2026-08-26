@@ -1,0 +1,66 @@
+---
+# CIS 5.7.1 – Namespaces provide logical isolation; use dedicated namespace per workload.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: inference-router
+  labels:
+    # OPA Gatekeeper: enforce constraints in this namespace (not excluded)
+    admission.gatekeeper.sh/ignore: "false"
+    # Pod Security Standards label (enforce restricted profile)
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    app.kubernetes.io/name: inference-router
+    environment: production
+---
+# CIS 5.4 – LimitRange ensures every container in the namespace gets default
+# resource requests/limits when none are specified, preventing noisy-neighbour issues.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: inference-router-limits
+  namespace: inference-router
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "500m"
+        memory: "512Mi"
+      defaultRequest:
+        cpu: "100m"
+        memory: "128Mi"
+      max:
+        cpu: "2000m"
+        memory: "4Gi"
+      min:
+        cpu: "50m"
+        memory: "64Mi"
+    - type: Pod
+      max:
+        cpu: "4000m"
+        memory: "8Gi"
+---
+# CIS 5.4 – ResourceQuota caps the total resource consumption in the namespace.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: inference-router-quota
+  namespace: inference-router
+spec:
+  hard:
+    # Compute
+    requests.cpu: "4"
+    requests.memory: "8Gi"
+    limits.cpu: "8"
+    limits.memory: "16Gi"
+    # Object count caps
+    pods: "20"
+    services: "10"
+    secrets: "20"
+    configmaps: "20"
+    persistentvolumeclaims: "0"
+    # Service type restrictions
+    services.loadbalancers: "0"
+    services.nodeports: "0"
