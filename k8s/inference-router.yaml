@@ -1,0 +1,176 @@
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: inference-router
+---
+# ConfigMap – non-sensitive configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inference-router-config
+  namespace: inference-router
+data:
+  INFERENCE_URL_CONFIDENTIAL: "http://inference-service-a.inference-router.svc.cluster.local/v1/chat/completions"
+  INFERENCE_URL_INTERNAL: "http://inference-service-b.inference-router.svc.cluster.local/v1/chat/completions"
+  INFERENCE_URL_PUBLIC: "http://inference-service-c.inference-router.svc.cluster.local/v1/chat/completions"
+  ANONYMIZER_ENABLED: "true"
+  ANONYMIZATION_SKIP_ALLOWED_ROLES: '["admin","trusted"]'
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://grafana-alloy.monitoring.svc.cluster.local:4317"
+  OTEL_SERVICE_NAME: "inference-router"
+  LOG_LEVEL: "INFO"
+  CLASSIFIER_LANGUAGE: "en"
+  CLASSIFIER_SCORE_THRESHOLD: "0.5"
+---
+# Secret – sensitive values (base64-encode your real keys)
+# kubectl create secret generic inference-router-secrets \
+#   --from-literal=API_KEYS="key1,key2" \
+#   --from-literal=API_KEY_ROLES="key1:admin,key2:trusted" \
+#   --namespace inference-router --dry-run=client -o yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: inference-router-secrets
+  namespace: inference-router
+type: Opaque
+# IMPORTANT: Replace the base64 values below with your real secrets.
+# Generate with: echo -n 'your-value' | base64
+stringData:
+  API_KEYS: "REPLACE_ME"
+  API_KEY_ROLES: "REPLACE_ME:admin"
+---
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-router
+  namespace: inference-router
+  labels:
+    app: inference-router
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: inference-router
+  template:
+    metadata:
+      labels:
+        app: inference-router
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: inference-router
+          image: ghcr.io/ergendoeper/inference-router:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+          envFrom:
+            - configMapRef:
+                name: inference-router-config
+            - secretRef:
+                name: inference-router-secrets
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-router
+  namespace: inference-router
+  labels:
+    app: inference-router
+spec:
+  type: ClusterIP
+  selector:
+    app: inference-router
+  ports:
+    - port: 80
+      targetPort: 8000
+      name: http
+---
+# HorizontalPodAutoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: inference-router
+  namespace: inference-router
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: inference-router
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+# Ingress (adjust host and TLS to match your cluster)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: inference-router
+  namespace: inference-router
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - inference-router.example.com
+      secretName: inference-router-tls
+  rules:
+    - host: inference-router.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: inference-router
+                port:
+                  name: http

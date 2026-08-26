@@ -1,0 +1,77 @@
+version: "3.9"
+
+services:
+  # ── Inference Router (this application) ───────────────────────────────────
+  inference-router:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # --- Inference endpoints (replace with real URLs) ---
+      INFERENCE_URL_CONFIDENTIAL: "http://inference-service-a:8080/v1/chat/completions"
+      INFERENCE_URL_INTERNAL: "http://inference-service-b:8080/v1/chat/completions"
+      INFERENCE_URL_PUBLIC: "http://inference-service-c:8080/v1/chat/completions"
+      # --- Auth (comma-separated API keys) ---
+      API_KEYS: "change-me-key1,change-me-key2"
+      API_KEY_ROLES: "change-me-key1:admin,change-me-key2:trusted"
+      # --- Anonymisation ---
+      ANONYMIZER_ENABLED: "true"
+      ANONYMIZATION_SKIP_ALLOWED_ROLES: '["admin", "trusted"]'
+      # --- OTEL (point to Alloy) ---
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://alloy:4317"
+      OTEL_SERVICE_NAME: "inference-router"
+      # --- Logging ---
+      LOG_LEVEL: "INFO"
+    depends_on:
+      - alloy
+    restart: unless-stopped
+
+  # ── Grafana Alloy (OTEL collector + Prometheus / Loki forwarding) ──────────
+  alloy:
+    image: grafana/alloy:v1.1.1
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "12345:12345" # Alloy UI
+    volumes:
+      - ./k8s/alloy/config.alloy:/etc/alloy/config.alloy:ro
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+    restart: unless-stopped
+
+  # ── Prometheus ─────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./k8s/alloy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    restart: unless-stopped
+
+  # ── Loki ──────────────────────────────────────────────────────────────────
+  loki:
+    image: grafana/loki:2.9.6
+    ports:
+      - "3100:3100"
+    restart: unless-stopped
+
+  # ── Grafana ───────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./k8s/alloy/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+    depends_on:
+      - prometheus
+      - loki
+    restart: unless-stopped
+
+volumes:
+  grafana-data:
