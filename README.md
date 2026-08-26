@@ -82,6 +82,11 @@ curl -X POST http://localhost:8000/v1/infer \
 | `INFERENCE_URL_PUBLIC` | `http://inference-service-c/v1/chat/completions` | URL C for PUBLIC data |
 | `INFERENCE_TIMEOUT_SECONDS` | `60.0` | HTTP timeout for upstream calls |
 | `INFERENCE_VERIFY_SSL` | `true` | Verify TLS certs on upstream calls |
+| `LITELLM_MODEL_CONFIDENTIAL` | `openai/gpt-4o` | LiteLLM model alias for CONFIDENTIAL routing |
+| `LITELLM_MODEL_INTERNAL` | `openai/gpt-4o-mini` | LiteLLM model alias for INTERNAL routing |
+| `LITELLM_MODEL_PUBLIC` | `openai/gpt-3.5-turbo` | LiteLLM model alias for PUBLIC routing |
+| `LITELLM_ENABLE_FALLBACKS` | `true` | Enable LiteLLM fallback chain |
+| `LITELLM_MAX_RETRIES` | `3` | Max LiteLLM retry attempts |
 | `API_KEYS` | _(empty – auth disabled)_ | Comma-separated list of API keys |
 | `API_KEY_ROLES` | _(empty)_ | Key→role mapping, e.g. `key1:admin,key2:trusted` |
 | `ANONYMIZER_ENABLED` | `true` | Enable anonymisation by default |
@@ -91,6 +96,19 @@ curl -X POST http://localhost:8000/v1/infer \
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | _(empty – OTEL disabled)_ | OTLP gRPC endpoint, e.g. `http://alloy:4317` |
 | `OTEL_SERVICE_NAME` | `inference-router` | Service name in traces/metrics |
 | `LOG_LEVEL` | `INFO` | Python log level |
+
+### LiteLLM routing backend
+
+Routing to URL A/B/C now uses `litellm.acompletion()` instead of direct `httpx` POST calls.
+Each classification level maps to a configurable LiteLLM model alias while keeping the
+same URL-based backend split via `api_base`:
+
+- `CONFIDENTIAL` → `INFERENCE_URL_CONFIDENTIAL` + `LITELLM_MODEL_CONFIDENTIAL`
+- `INTERNAL` → `INFERENCE_URL_INTERNAL` + `LITELLM_MODEL_INTERNAL`
+- `PUBLIC` → `INFERENCE_URL_PUBLIC` + `LITELLM_MODEL_PUBLIC`
+
+Structured JSON logs include `request_id`, `classification_level`, `target_model`,
+`anonymized`, `duration_ms`, and `status_code`.
 
 ---
 
