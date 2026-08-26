@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# RAGAS evaluation results
+quality/ragas_results.csv
