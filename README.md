@@ -14,7 +14,7 @@ Client
   │
   ▼
 ┌─────────────────────────────────────────────────────────┐
-│              Inference Router (FastAPI)                  │
+│              Inference Router (LiteLLM)                  │
 │                                                          │
 │  1. Classify text          (Presidio Analyzer)           │
 │     SECRET  → 403 Rejected                              │
